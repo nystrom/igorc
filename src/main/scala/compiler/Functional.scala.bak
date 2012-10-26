@@ -1,0 +1,347 @@
+package compiler
+
+object Main extends App {
+  run(args.mkString(" "))
+
+  def peval(e: Exp) = {
+    val r = eval(e)(Map.empty)
+    println(r)
+  }
+
+  def run(arg: String) = {
+    parse(arg) map { p =>
+      peval(p)
+      val s = lambdaLift(p)
+      peval(s)
+      val t = lower(s)
+      peval(t)
+    }
+  }
+  case class LambdaStar(xs: List[Symbol], e: Exp) extends Exp
+  case class MakeClosure(proc: Exp, env: Exp) extends Exp
+  case class MakeEnv(map: Map[Symbol, Exp]) extends Exp
+  case class EnvRef(env: Exp, x: Symbol) extends Exp
+  case class ApplyClosure(f: Exp, es: List[Exp]) extends Exp
+
+  def fresh = {
+    var n = 0
+    (x: Symbol) => {
+      n += 1
+      Symbol(x.name + "$" + n)
+    }
+  }
+
+  import Envs._
+
+  def alpha(t: Exp): M[Exp] = t match {
+    case IntLit(v) => unitM(IntLit(v))
+    case Lam(x, e) =>
+      (env: Env) => {
+        val y = fresh(x)
+        Lam(y, alpha(e)(env + (x -> Var(y))))
+      }
+    case Var(x) =>
+      (env: Env) => env(x)
+    case App(e1, e2) =>
+      for {
+        v1 <- alpha(e1)
+        v2 <- alpha(e2)
+      } yield App(v1, v2)
+    case Bin(e1, op, e2) =>
+      for {
+        v1 <- alpha(e1)
+        v2 <- alpha(e2)
+      } yield Bin(v1, op, v2)
+    case t => throw new RuntimeException("unexpected node " + t)
+  }
+
+  def lambdaLift(e: Exp): Exp = {
+    val a = alpha(e)(Map.empty)
+    lift(a)
+  }
+
+  case class Let(env: Map[Symbol, Exp], body) extends Exp
+
+  def lift(e: Exp): Exp = e match {
+    case IntLit(v) => IntLit(v)
+    case Var(x) => Var(x)
+    case Bin(Let(env1, e1), op, Let(env2, e2)) =>
+      Let(env1 ++ env2, Bin(e1, op, e2))
+    case Bin(Let(env1, e1), op, e2) =>
+      Let(env1, Bin(e1, op, e2))
+    case Bin(e1, op, Let(env2, e2)) =>
+      Let(env2, Bin(e1, op, e2))
+    case Bin(e1, op, e2) =>
+      Bin(e1, op, e2)
+    case App(Let(env1, e1), Let(env2, e2)) =>
+      Let(env1 ++ env2, App(e1, e2))
+    case App(Let(env1, e1), e2) =>
+      Let(env1, App(e1, e2))
+    case App(e1, Let(env2, e2)) =>
+      Let(env2, App(e1, e2))
+    case App(e1, e2) =>
+      App(e1, e2)
+    case Lam(x, e) =>
+      val y = fresh()
+      Let(Map.empty + (y -> Lam(x, e)), Var(y))
+  }
+
+
+  def lower(p: Exp): Exp = {
+    // convert to imperative code
+    p
+  }
+
+  val next: () => Int = {
+    var n = 0
+    () => {
+      n += 1
+      n
+    }
+  }
+  
+  def gensym(prefix: String = "_") = Symbol(prefix + next())
+
+case class StaticCall(f: Symbol, es: List[Exp]) extends Exp
+
+//  def cc(e: Exp, env: Env): (List[Function], Exp) = e match {
+//    case Lam(x, e1) => (Nil, e)
+//    case App(e1, e2) => App(cc(e1, env), cc(e2, env))
+//    case e => (Nil, e)
+//  }
+
+  trait Tree
+  case class Let(name: Symbol, e1: Exp, e2: Exp) extends Tree
+
+  object Lam {
+    def fromArgs(args: List[Symbol], e: Exp): Exp = args.foldRight[Exp](e)(Lam.apply _)
+  }
+
+  trait Exp extends Tree
+  case class IntLit(value: Int) extends Exp
+  case class Bin(e1: Exp, op: Symbol, e2: Exp) extends Exp
+  case class App(e1: Exp, e2: Exp) extends Exp
+  case class Lam(x: Symbol, e: Exp) extends Exp
+  case class Closure(x: Symbol, e: Exp, env: Map[Symbol, Exp]) extends Exp
+  case class Var(x: Symbol) extends Exp
+
+  trait Parser[+A] {
+    self =>
+
+    def parse(s: String): Option[(String, A)]
+
+    def ~[B](p: => Parser[B]) = new Sequence(this, p)
+    def |[B >: A](p: => Parser[B]) = new Union[B](this, p)
+    def /[B >: A](p: => Parser[B]) = new Alt[B](this, p)
+    def * = new Star(this)
+    def + = new Sequence(this, this*) map { case (a, as) => a :: as }
+    def ? = new Opt(this)
+
+    def map[B](f: A => B): Parser[B] = new Parser[B] {
+      def parse(s: String) = {
+        self.parse(s) map {
+          case (s1, a1) => (s1, f(a1))
+        }
+      }
+    }
+    def flatMap[B](f: A => Parser[B]): Parser[B] = new Parser[B] {
+      def parse(s: String) = {
+        self.parse(s) flatMap {
+          case (s1, a1) => f(a1).parse(s1)
+        }
+      }
+    }
+    def filter(f: A => Boolean): Parser[A] = new Parser[A] {
+      def parse(s: String) = {
+        self.parse(s) match {
+          case Some((s1, a1)) if f(a1) => Some((s1, a1))
+          case _ => None
+        }
+      }
+    }
+  }
+
+  object Eof extends Parser[Unit] {
+    def parse(s: String) = {
+      if (s.isEmpty) Some("", ())
+      else None
+    }
+  }
+  
+  object Any extends Parser[Char] {
+    def parse(s: String) = s.headOption map { a => (s.tail, a) }
+  }
+
+  case class Ch(ch: Char) extends Parser[Char] {
+    def parse(s: String) = s.headOption flatMap {
+      case a if a == ch => Some((s.tail, a))
+      case _ => None
+    }
+  }
+
+  case class St(st: String) extends Parser[String] {
+    def parse(s: String) = if (s.startsWith(st)) Some((s.drop(st.length), st)) else None
+  }
+
+  case class AnyOf(cs: Seq[Char]) extends Parser[Char] {
+    def parse(s: String) = s.headOption flatMap {
+      case ch if cs contains ch => Some((s.tail, ch))
+      case _ => None
+    }
+  }
+
+  // Sequence
+  class Sequence[+A, +B](pa: => Parser[A], pb: => Parser[B]) extends Parser[(A, B)] {
+    def parse(s: String) = {
+      pa.parse(s) flatMap {
+        case (s1, a) => pb.parse(s1) map {
+          case (s2, b) => (s2, (a, b))
+        }
+      }
+    }
+  }
+
+  // Ordered choice
+  class Alt[+A](pa: => Parser[A], pb: => Parser[A]) extends Parser[A] {
+    def parse(s: String) = {
+      pa.parse(s) match {
+        case Some((s1, a1)) => Some((s1, a1))
+        case None => pb.parse(s) match {
+          case Some((s2, a2)) => Some((s2, a2))
+          case None => None
+        }
+      }
+    }
+  }
+
+  // Unordered choice -- take the longest
+  class Union[+A](pa: => Parser[A], pb: => Parser[A]) extends Parser[A] {
+    def parse(s: String) = {
+      (pa.parse(s), pb.parse(s)) match {
+        case (Some((s1, a1)), Some((s2, a2))) if (s1.length <= s2.length) => Some((s1, a1))
+        case (Some((s1, a1)), Some((s2, a2))) => Some((s2, a2))
+        case (Some((s1, a1)), None) => Some((s1, a1))
+        case (None, Some((s2, a2))) => Some((s2, a2))
+        case (None, None) => None
+      }
+    }
+  }
+
+  class Star[+A](pa: => Parser[A]) extends Parser[List[A]] {
+    def parse(s: String): Option[(String, List[A])] = {
+      pa.parse(s) match {
+        case Some((s1, a1)) =>
+          new Star(pa).parse(s1) map {
+            case (s2, as) =>
+              println("append " + (a1::as))
+              (s2, a1 :: as)
+          }
+        case None =>
+          Some((s, Nil))
+      }
+    }
+  }
+
+  class Opt[+A](pa: => Parser[A]) extends Parser[Option[A]] {
+    def parse(s: String): Option[(String, Option[A])] = {
+      pa.parse(s) match {
+        case Some((s1, a)) =>
+          Some((s1, Some(a)))
+        case None =>
+          Some((s, None))
+      }
+    }
+  }
+
+  def parse(file: String): Option[Exp] = {
+    val source = try {
+      scala.io.Source.fromFile(file).toArray.mkString
+    } catch {
+      case ex: java.io.FileNotFoundException => file
+    }
+    println("unparsed: " + source)
+
+    lazy val ws: Parser[Unit] = {
+      // careful! don't use the implicit str2token because it'll be recursive
+      (Ch(' ') / Ch('\n') / Ch('\t')).* map { _ => () }
+    }
+
+    def token[A](p: => Parser[A]) = {
+      ws ~ p map { case (_, a) => a }
+    }
+
+    implicit def str2token(s: String): Parser[String] = token(new St(s))
+
+    lazy val upper = AnyOf('A' to 'Z')
+    lazy val lower = AnyOf('a' to 'z')
+    lazy val digit = AnyOf('0' to '9')
+    lazy val letter = upper | lower
+    lazy val ident: Parser[Symbol] = token { (letter ~ (letter / digit).*) map { case (x, xs) => (x :: xs).mkString } map { s => Symbol(s) } }
+    lazy val number: Parser[Exp] = token { (digit ~ digit.*) map { case (x, xs) => (x :: xs).mkString } map { s => IntLit(s.toInt) } }
+    lazy val exp: Parser[Exp] = lam / plus / minus / app / par / (ident map Var) / number
+    lazy val par: Parser[Exp] = "(" ~ exp ~ ")" map { case ((_, e), _) => e }
+    lazy val app: Parser[Exp] = "(" ~ exp ~ exp ~ ")" map { case (((_, e1), e2), _) => App(e1, e2) }
+    lazy val plus: Parser[Exp] = "(" ~ "+" ~ exp ~ exp ~ ")" map { case ((((_, _), e1), e2), _) => Bin(e1, '+, e2) }
+    lazy val minus: Parser[Exp] = "(" ~ "-" ~ exp ~ exp ~ ")" map { case ((((_, _), e1), e2), _) => Bin(e1, '-, e2) }
+    lazy val lam: Parser[Exp] = "(" ~ "lambda" ~ "(" ~ ident ~ ")" ~ exp ~ ")" map { case ((((((_, _), _), x), _), e), _) => Lam(x, e) }
+    lazy val parser: Parser[Exp] = (exp ~ ws ~ Eof) map { case ((e, _), _) => e }
+
+    parser.parse(source) flatMap {
+      case ("", t) => println("parsed " + t); Some(t)
+      case (s, p) => println("remaining input: " + s); println(p); None
+      case x => println("huh " + x); None
+    }
+  }
+
+  object Envs {
+    type Env = Map[Symbol, Exp]
+    type M[A] = Env => A
+
+    def unitM[A](x: A): M[A] = (env: Env) => x
+
+    class MWrap[A](m: M[A]) {
+      def flatMap[B](f: A => M[B]): M[B] = {
+        (env: Env) => f(m(env))(env)
+      }
+      def map[B](f: A => B): M[B] = {
+        (env: Env) => f(m(env))
+      }
+      def filter(f: A => Boolean): M[A] = {
+        (env: Env) =>
+          val v = m(env)
+          if (f(v))
+            v
+          else
+            throw new MatchError
+      }
+    }
+
+    implicit def m2bindM[A](m: M[A]): MWrap[A] = new MWrap(m)
+  }
+
+  def eval(t: Tree): M[Exp] = {
+    println(t)
+    t match {
+      case IntLit(v) => unitM(IntLit(v))
+      case Lam(x, e) =>
+        // Capture the environment
+        (env: Env) => Closure(x, e, env)
+      case Var(x) => (env: Env) => env(x)
+      case App(e1, e2) =>
+        for {
+          Closure(x, e, env) <- eval(e1)
+          v <- eval(e2)
+        } yield eval(e)(env + (x -> v))
+      case Bin(x, '+, y) =>
+        for {
+          IntLit(v) <- eval(x)
+          IntLit(w) <- eval(y)
+        } yield IntLit(v + w)
+      case Bin(x, '-, y) =>
+        for {
+          IntLit(v) <- eval(x)
+          IntLit(w) <- eval(y)
+        } yield IntLit(v - w)
+    }
+  }
+}

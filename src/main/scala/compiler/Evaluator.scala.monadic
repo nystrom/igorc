@@ -1,0 +1,102 @@
+package compiler
+
+object Evaluator {
+  import Trees._
+
+  def eval(p: Program): Exp = {
+    p.funs collectFirst {
+      case Fun('main, Nil, body) => eval(body)(new Env(p, Map.empty))
+    } get
+  }
+
+  class Env(val p: Program, var vars: Map[Symbol, Exp]) {
+  }
+
+  def unitM[A](e: A) = (env: Env) => e
+  type M[A] = Env => A
+  class MWrapper[A](m: M[A]) {
+    def flatMap[B](f: A => M[B]): M[B] = {
+      (env: Env) => f(m(env))(env)
+    }
+    def map[B](f: A => B): M[B] = {
+      (env: Env) => f(m(env))
+    }
+    def filter(f: A => Boolean): (Env => A) = {
+      (env: Env) => {
+        val a = m(env)
+        if (f(a)) a
+        else throw new RuntimeException("ugugughg")
+      }
+    }
+  }
+  implicit def wrap[A](m: Env => A) = new MWrapper(m)
+
+  def eval(e: Exp): Env => Exp = e match {
+    case IntLit(value) => unitM(IntLit(value))
+    
+//          case Bin(IntLit(x), '+, IntLit(y)) => IntLit(x+y)
+//      case Bin(IntLit(x), '-, IntLit(y)) => IntLit(x-y)
+//      case Bin(IntLit(x), '*, IntLit(y)) => IntLit(x*y)
+//      case Bin(IntLit(x), '/, IntLit(y)) => IntLit(x/y)
+//      case Bin(IntLit(x), '<, IntLit(y)) => IntLit(if (x < y) 1 else 0)
+//      case Bin(IntLit(x), '>, IntLit(y)) => IntLit(if (x > y) 1 else 0)
+//      case Bin(IntLit(x), '<=, IntLit(y)) => IntLit(if (x <= y) 1 else 0)
+//      case Bin(IntLit(x), '>=, IntLit(y)) => IntLit(if (x >= y) 1 else 0)
+//      case Bin(IntLit(x), '==, IntLit(y)) => IntLit(if (x == y) 1 else 0)
+//      case Bin(IntLit(x), '!=, IntLit(y)) => IntLit(if (x != y) 1 else 0)
+//      case Bin(x, op, y) => eval(Bin(eval(x)(env), op, eval(y)(env)))(env)
+
+    case Bin(e1, '+, e2) =>
+      for (x <- List(1,2,3)) yield (x+1)
+      
+      for {
+        IntLit(v1) <- eval(e1)
+        IntLit(v2) <- eval(e2)
+      } yield IntLit(v1 + v2)
+      
+      eval(e1) flatMap {
+        case IntLit(v1) => eval(e2) map {
+          case IntLit(v2) => IntLit(v1 + v2)
+        }
+      }
+      
+    case Bin(e1, '-, e2) =>
+      for {
+    	  IntLit(v1) <- eval(e1)
+    	  IntLit(v2) <- eval(e2)
+      } yield IntLit(v1 - v2)
+
+    case Invoke(f, args) =>
+      env =>
+        env.p.funs collectFirst {
+          case Fun(name, params, body) if name == f =>
+            val env2 = new Env(env.p, (params zip (args map (a => eval(a)(env)))).toMap)
+            eval(body)(env2)
+        } get
+
+    case If(cond, e1, e2) => 
+      eval(cond) flatMap {
+        case IntLit(0) => eval(e2)
+        case IntLit(v) => eval(e1)
+      }
+    case While(cond, body) =>
+      env => eval(If(cond, Seq(body :: While(cond, body) :: Nil), Seq(Nil)))(env)
+
+    case Var(x) =>
+      env => env.vars(x)
+    case Assign(x, e) =>
+      env => {
+        val v = eval(e)(env)
+        env.vars += (x -> v)
+        v
+      }
+
+    case Seq(Nil) => unitM(IntLit(0))
+    case Seq(s :: Nil) => env => eval(s)(env)
+    case Seq(s :: ss) =>
+      env => {
+        eval(s)(env)
+        eval(Seq(ss))(env)
+      }
+  }
+}
